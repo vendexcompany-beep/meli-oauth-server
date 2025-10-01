@@ -1,4 +1,4 @@
-// server.js  (Node 18+)
+// server.js (PKCE S256)
 import express from "express";
 import axios from "axios";
 import crypto from "crypto";
@@ -11,10 +11,9 @@ const ML_CLIENT_SECRET = process.env.ML_CLIENT_SECRET;
 const BASE_URL = process.env.BASE_URL;           // ex.: https://meli-oauth-server.onrender.com
 const REDIRECT_PATH = process.env.REDIRECT_PATH || "/callback";
 
-// Armazena code_verifier por state (volátil em memória; suficiente para o fluxo)
+// guarda code_verifier por state (em memória)
 const verifierStore = new Map();
 
-// Helpers PKCE
 const b64url = buf => buf.toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
 const genVerifier = (len=64) => {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
@@ -24,14 +23,12 @@ const challengeS256 = v => b64url(crypto.createHash("sha256").update(v).digest()
 
 app.get("/", (_req, res) => res.send("OK - ML OAuth PKCE server up"));
 
-/** 1) Início do fluxo: gera code_challenge e redireciona para o ML */
 app.get("/start", (req, res) => {
   const redirect_uri = `${BASE_URL}${REDIRECT_PATH}`;
   const state = crypto.randomBytes(16).toString("hex");
   const code_verifier = genVerifier();
   const code_challenge = challengeS256(code_verifier);
 
-  // guarda temporariamente para usar no callback
   verifierStore.set(state, code_verifier);
 
   const auth = new URL("https://auth.mercadolivre.com.br/authorization");
@@ -45,7 +42,6 @@ app.get("/start", (req, res) => {
   res.redirect(auth.toString());
 });
 
-/** 2) Callback: troca code -> tokens enviando o code_verifier */
 app.get(REDIRECT_PATH, async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -53,7 +49,7 @@ app.get(REDIRECT_PATH, async (req, res) => {
 
     const code_verifier = verifierStore.get(state);
     verifierStore.delete(state);
-    if (!code_verifier) return res.status(400).send("state inválido ou expirado");
+    if (!code_verifier) return res.status(400).send("state inválido/expirado");
 
     const tokenUrl = "https://api.mercadolibre.com/oauth/token";
     const redirect_uri = `${BASE_URL}${REDIRECT_PATH}`;
@@ -71,10 +67,10 @@ app.get(REDIRECT_PATH, async (req, res) => {
     });
 
     res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.end(JSON.stringify(data, null, 2)); // << copie o refresh_token daqui
+    res.end(JSON.stringify(data, null, 2));
   } catch (err) {
     console.error(err?.response?.data || err.message);
-    res.status(500).send("Falha ao trocar code por token (veja logs).");
+    res.status(500).send("Falha ao trocar code por token.");
   }
 });
 
