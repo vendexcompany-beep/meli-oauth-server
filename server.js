@@ -1,19 +1,34 @@
-// server.js (PKCE S256)
+// server.js
 import express from "express";
 import axios from "axios";
 import crypto from "crypto";
+import { google } from "googleapis";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ======= Mercado Livre =======
 const ML_CLIENT_ID = process.env.ML_CLIENT_ID;
 const ML_CLIENT_SECRET = process.env.ML_CLIENT_SECRET;
-const BASE_URL = process.env.BASE_URL;           // ex.: https://meli-oauth-server.onrender.com
+const BASE_URL = process.env.BASE_URL;           
 const REDIRECT_PATH = process.env.REDIRECT_PATH || "/callback";
 
-// guarda code_verifier por state (em memória)
-const verifierStore = new Map();
+// ======= Google Sheets =======
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI; // https://meli-oauth-server.onrender.com/callback
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 
+const oAuth2Client = new google.auth.OAuth2(
+  GOOGLE_CLIENT_ID,
+  GOOGLE_CLIENT_SECRET,
+  GOOGLE_REDIRECT_URI
+);
+
+const SHEET_NAME = "Tokens";
+
+// ======= PKCE =======
+const verifierStore = new Map();
 const b64url = buf => buf.toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
 const genVerifier = (len=64) => {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
@@ -23,6 +38,7 @@ const challengeS256 = v => b64url(crypto.createHash("sha256").update(v).digest()
 
 app.get("/", (_req, res) => res.send("OK - ML OAuth PKCE server up"));
 
+// ======= Início OAuth Mercado Livre =======
 app.get("/start", (req, res) => {
   const redirect_uri = `${BASE_URL}${REDIRECT_PATH}`;
   const state = crypto.randomBytes(16).toString("hex");
@@ -42,6 +58,7 @@ app.get("/start", (req, res) => {
   res.redirect(auth.toString());
 });
 
+// ======= Callback OAuth Mercado Livre =======
 app.get(REDIRECT_PATH, async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -62,9 +79,26 @@ app.get(REDIRECT_PATH, async (req, res) => {
     body.append("redirect_uri", redirect_uri);
     body.append("code_verifier", code_verifier);
 
+    // troca code por token ML
     const { data } = await axios.post(tokenUrl, body, {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
     });
+
+    // ==== Salva no Google Sheets ====
+    try {
+      const sheets = google.sheets({ version: "v4", auth: oAuth2Client });
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME}!A:C`,
+        valueInputOption: "RAW",
+        requestBody: {
+          values: [[new Date().toISOString(), data.access_token, data.refresh_token]]
+        }
+      });
+      console.log("Tokens salvos no Google Sheets.");
+    } catch (sheetErr) {
+      console.error("Erro ao salvar na planilha:", sheetErr.message);
+    }
 
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.end(JSON.stringify(data, null, 2));
