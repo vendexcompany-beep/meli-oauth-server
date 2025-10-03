@@ -1,4 +1,3 @@
-// server.js
 import express from "express";
 import axios from "axios";
 import crypto from "crypto";
@@ -10,13 +9,13 @@ const PORT = process.env.PORT || 3000;
 // ======= Mercado Livre =======
 const ML_CLIENT_ID = process.env.ML_CLIENT_ID;
 const ML_CLIENT_SECRET = process.env.ML_CLIENT_SECRET;
-const BASE_URL = process.env.BASE_URL;           
+const BASE_URL = process.env.BASE_URL;
 const REDIRECT_PATH = process.env.REDIRECT_PATH || "/callback";
 
 // ======= Google Sheets =======
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI; // https://meli-oauth-server.onrender.com/callback
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI; // ex: https://meli-oauth-server.onrender.com/google-callback
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 
 const oAuth2Client = new google.auth.OAuth2(
@@ -27,7 +26,7 @@ const oAuth2Client = new google.auth.OAuth2(
 
 const SHEET_NAME = "Tokens";
 
-// ======= PKCE =======
+// PKCE para Mercado Livre
 const verifierStore = new Map();
 const b64url = buf => buf.toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
 const genVerifier = (len=64) => {
@@ -36,9 +35,51 @@ const genVerifier = (len=64) => {
 };
 const challengeS256 = v => b64url(crypto.createHash("sha256").update(v).digest());
 
-app.get("/", (_req, res) => res.send("OK - ML OAuth PKCE server up"));
+// ====================
+// ROTAS GOOGLE SHEETS
+// ====================
 
-// ======= Início OAuth Mercado Livre =======
+// Página inicial só para teste
+app.get("/", (_req, res) => {
+  res.send(`
+    <h2>Servidor ativo 🚀</h2>
+    <p><a href="/google-auth">Autorizar Google Sheets</a></p>
+    <p><a href="/start">Iniciar OAuth Mercado Livre</a></p>
+  `);
+});
+
+// Passo 1 - Gerar URL de autorização do Google
+app.get("/google-auth", (req, res) => {
+  const scopes = ["https://www.googleapis.com/auth/spreadsheets"];
+  const url = oAuth2Client.generateAuthUrl({
+    access_type: "offline",
+    prompt: "consent",
+    scope: scopes,
+  });
+  res.redirect(url);
+});
+
+// Passo 2 - Receber callback do Google
+app.get("/google-callback", async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).send("Nenhum código recebido do Google.");
+
+  try {
+    const { tokens } = await oAuth2Client.getToken(code);
+    oAuth2Client.setCredentials(tokens);
+
+    // Confirma que funcionou
+    res.send(`<h3>✅ Google autorizado com sucesso!</h3>
+              <p>Agora já posso escrever na planilha.</p>`);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Erro ao obter tokens do Google.");
+  }
+});
+
+// ========================
+// ROTAS MERCADO LIVRE
+// ========================
 app.get("/start", (req, res) => {
   const redirect_uri = `${BASE_URL}${REDIRECT_PATH}`;
   const state = crypto.randomBytes(16).toString("hex");
@@ -58,7 +99,6 @@ app.get("/start", (req, res) => {
   res.redirect(auth.toString());
 });
 
-// ======= Callback OAuth Mercado Livre =======
 app.get(REDIRECT_PATH, async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -79,12 +119,11 @@ app.get(REDIRECT_PATH, async (req, res) => {
     body.append("redirect_uri", redirect_uri);
     body.append("code_verifier", code_verifier);
 
-    // troca code por token ML
     const { data } = await axios.post(tokenUrl, body, {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
     });
 
-    // ==== Salva no Google Sheets ====
+    // ==== Salvar tokens ML no Sheets ====
     try {
       const sheets = google.sheets({ version: "v4", auth: oAuth2Client });
       await sheets.spreadsheets.values.append({
@@ -95,7 +134,7 @@ app.get(REDIRECT_PATH, async (req, res) => {
           values: [[new Date().toISOString(), data.access_token, data.refresh_token]]
         }
       });
-      console.log("Tokens salvos no Google Sheets.");
+      console.log("Tokens ML salvos no Google Sheets.");
     } catch (sheetErr) {
       console.error("Erro ao salvar na planilha:", sheetErr.message);
     }
@@ -108,4 +147,4 @@ app.get(REDIRECT_PATH, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`Listening on http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
