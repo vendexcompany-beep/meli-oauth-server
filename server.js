@@ -1,3 +1,4 @@
+// server.js (PKCE + grava no Google Sheets)
 import express from "express";
 import axios from "axios";
 import crypto from "crypto";
@@ -6,28 +7,20 @@ import { google } from "googleapis";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ======= Mercado Livre =======
+// Mercado Livre
 const ML_CLIENT_ID = process.env.ML_CLIENT_ID;
 const ML_CLIENT_SECRET = process.env.ML_CLIENT_SECRET;
-const BASE_URL = process.env.BASE_URL;
+const BASE_URL = process.env.BASE_URL;           // ex.: https://meli-oauth-server.onrender.com
 const REDIRECT_PATH = process.env.REDIRECT_PATH || "/callback";
 
-// ======= Google Sheets =======
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI; // ex: https://meli-oauth-server.onrender.com/google-callback
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+// Google Sheets
+const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
+const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID; // 1fPjwsYeMK3lOo1c7MCUWgwJLEM1EsvJAMgWKVdM5oHQ
 
-const oAuth2Client = new google.auth.OAuth2(
-  GOOGLE_CLIENT_ID,
-  GOOGLE_CLIENT_SECRET,
-  GOOGLE_REDIRECT_URI
-);
-
-const SHEET_NAME = "Tokens";
-
-// PKCE para Mercado Livre
+// guarda code_verifier por state (em memória)
 const verifierStore = new Map();
+
 const b64url = buf => buf.toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
 const genVerifier = (len=64) => {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
@@ -35,52 +28,48 @@ const genVerifier = (len=64) => {
 };
 const challengeS256 = v => b64url(crypto.createHash("sha256").update(v).digest());
 
-// ====================
-// ROTAS GOOGLE SHEETS
-// ====================
-
-// Página inicial só para teste
-app.get("/", (_req, res) => {
-  res.send(`
-    <h2>Servidor ativo 🚀</h2>
-    <p><a href="/google-auth">Autorizar Google Sheets</a></p>
-    <p><a href="/start">Iniciar OAuth Mercado Livre</a></p>
-  `);
-});
-
-// Passo 1 - Gerar URL de autorização do Google
-app.get("/google-auth", (req, res) => {
-  const scopes = ["https://www.googleapis.com/auth/spreadsheets"];
-  const url = oAuth2Client.generateAuthUrl({
-    access_type: "offline",
-    prompt: "consent",
-    scope: scopes,
-  });
-  res.redirect(url);
-});
-
-// Passo 2 - Receber callback do Google
-app.get("/google-callback", async (req, res) => {
-  const code = req.query.code;
-  if (!code) return res.status(400).send("Nenhum código recebido do Google.");
-
-  try {
-    const { tokens } = await oAuth2Client.getToken(code);
-    oAuth2Client.setCredentials(tokens);
-
-    // Confirma que funcionou
-    res.send(`<h3>✅ Google autorizado com sucesso!</h3>
-              <p>Agora já posso escrever na planilha.</p>`);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("Erro ao obter tokens do Google.");
+// ----- Google Sheets helper -----
+async function appendToSheet({ user_id, access_token, refresh_token, expires_in }) {
+  if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY || !SPREADSHEET_ID) {
+    console.warn("Google env vars ausentes; pulando escrita na planilha.");
+    return;
   }
+
+  const auth = new google.auth.JWT({
+    email: GOOGLE_CLIENT_EMAIL,
+    key: GOOGLE_PRIVATE_KEY,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+
+  const sheets = google.sheets({ version: "v4", auth });
+
+  const nowIso = new Date().toISOString();
+  const expiresAtEpoch = Math.floor(Date.now() / 1000) + Number(expires_in || 21600);
+
+  // Ajuste o range conforme sua aba: 'Página1' ou 'Sheet1'. Aqui uso a primeira aba com A:D.
+  const range = "A:D"; // Timestamp | user_id | access_token | refresh_token
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range,
+    valueInputOption: "RAW",
+    requestBody: {
+      values: [[nowIso, String(user_id), access_token, refresh_token]],
+    },
+  });
+
+  console.log("✅ Tokens gravados na planilha:", SPREADSHEET_ID);
+}
+
+// ----- Rotas -----
+app.get("/", (_req, res) => {
+  // Página simples; pode servir 'public/index.html' se preferir
+  res.send(`<h1>Servidor ativo 🚀</h1>
+    <p><a href="/start">Iniciar OAuth Mercado Livre</a></p>`);
 });
 
-// ========================
-// ROTAS MERCADO LIVRE
-// ========================
-app.get("/start", (req, res) => {
+// Início do fluxo (gera PKCE)
+app.get("/start", (_req, res) => {
   const redirect_uri = `${BASE_URL}${REDIRECT_PATH}`;
   const state = crypto.randomBytes(16).toString("hex");
   const code_verifier = genVerifier();
@@ -99,6 +88,7 @@ app.get("/start", (req, res) => {
   res.redirect(auth.toString());
 });
 
+// Callback: troca code -> tokens e grava na planilha
 app.get(REDIRECT_PATH, async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -106,7 +96,7 @@ app.get(REDIRECT_PATH, async (req, res) => {
 
     const code_verifier = verifierStore.get(state);
     verifierStore.delete(state);
-    if (!code_verifier) return res.status(400).send("state inválido/expirado");
+    if (!code_verifier) return res.status(400).send("state inválido/expirado (instância hibernou?)");
 
     const tokenUrl = "https://api.mercadolibre.com/oauth/token";
     const redirect_uri = `${BASE_URL}${REDIRECT_PATH}`;
@@ -123,28 +113,24 @@ app.get(REDIRECT_PATH, async (req, res) => {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
     });
 
-    // ==== Salvar tokens ML no Sheets ====
-    try {
-      const sheets = google.sheets({ version: "v4", auth: oAuth2Client });
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:C`,
-        valueInputOption: "RAW",
-        requestBody: {
-          values: [[new Date().toISOString(), data.access_token, data.refresh_token]]
-        }
-      });
-      console.log("Tokens ML salvos no Google Sheets.");
-    } catch (sheetErr) {
-      console.error("Erro ao salvar na planilha:", sheetErr.message);
-    }
+    // Grava na planilha (não aguarda na resposta do usuário)
+    appendToSheet({
+      user_id: data.user_id,
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_in: data.expires_in,
+    }).catch(e => console.error("Falha ao escrever na planilha:", e?.response?.data || e));
 
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.end(JSON.stringify(data, null, 2));
+    // Mostra algo amigável para o cliente
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.end(`
+      <h2>Autorização concluída ✅</h2>
+      <p>Tokens recebidos e salvos. Você já pode fechar esta janela.</p>
+    `);
   } catch (err) {
     console.error(err?.response?.data || err.message);
     res.status(500).send("Falha ao trocar code por token.");
   }
 });
 
-app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`Listening on http://localhost:${PORT}`));
