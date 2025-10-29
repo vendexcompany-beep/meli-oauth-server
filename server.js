@@ -6,18 +6,18 @@ import { google } from "googleapis";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Mercado Livre
+// ===== Mercado Livre =====
 const ML_CLIENT_ID = process.env.ML_CLIENT_ID;
 const ML_CLIENT_SECRET = process.env.ML_CLIENT_SECRET;
-const BASE_URL = process.env.BASE_URL;           // ex.: https://meli-oauth-server.onrender.com
+const BASE_URL = process.env.BASE_URL;              // ex.: https://meli-oauth-server.onrender.com
 const REDIRECT_PATH = process.env.REDIRECT_PATH || "/callback";
 
-// Google Sheets
+// ===== Google Sheets =====
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
 const GOOGLE_PRIVATE_KEY = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 
-// PKCE store
+// ===== PKCE store =====
 const verifierStore = new Map();
 const b64url = buf => buf.toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
 const genVerifier = (len=64) => {
@@ -26,7 +26,7 @@ const genVerifier = (len=64) => {
 };
 const challengeS256 = v => b64url(crypto.createHash("sha256").update(v).digest());
 
-// === Helpers ===
+// ===== Helpers =====
 async function getSheets() {
   const auth = new google.auth.GoogleAuth({
     credentials: {
@@ -38,17 +38,16 @@ async function getSheets() {
   return google.sheets({ version: "v4", auth });
 }
 
-/** Grava na planilha: timestamp | user_id | nickname | access_token | refresh_token  */
+/** Grava no Sheets: timestamp | user_id | nickname | access_token | refresh_token */
 async function appendToSheet({ user_id, nickname, access_token, refresh_token }) {
   if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY || !SPREADSHEET_ID) {
     console.warn("⚠️ Variáveis do Google ausentes; pulando escrita.");
     return;
   }
+
   const sheets = await getSheets();
   const nowIso = new Date().toISOString();
-
-  // Ajuste o range conforme sua aba; se for 'Página1', use 'Página1!A:E'
-  const range = "A:E";
+  const range = "A:E"; // ajuste para sua aba se necessário
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
@@ -58,21 +57,27 @@ async function appendToSheet({ user_id, nickname, access_token, refresh_token })
       values: [[nowIso, String(user_id), nickname || "", access_token, refresh_token]],
     },
   });
+
   console.log("✅ Gravado no Sheets:", { user_id, nickname });
 }
 
-// === Rotas ===
+// ===== Rotas =====
+
+// Tela inicial
 app.get("/", (_req, res) => {
-  res.send(`<h1>Servidor ativo 🚀</h1>
-  <p><a href="/start">Iniciar OAuth Mercado Livre</a></p>`);
+  res.send(`
+    <h1>Servidor ativo 🚀</h1>
+    <p><a href="/start">Iniciar OAuth Mercado Livre</a></p>
+  `);
 });
 
-// Início OAuth (gera PKCE)
+// Inicia o OAuth com PKCE
 app.get("/start", (_req, res) => {
   const redirect_uri = `${BASE_URL}${REDIRECT_PATH}`;
   const state = crypto.randomBytes(16).toString("hex");
   const code_verifier = genVerifier();
   const code_challenge = challengeS256(code_verifier);
+
   verifierStore.set(state, code_verifier);
 
   const auth = new URL("https://auth.mercadolivre.com.br/authorization");
@@ -86,7 +91,7 @@ app.get("/start", (_req, res) => {
   res.redirect(auth.toString());
 });
 
-// Callback: troca code -> tokens, busca nickname e grava no Sheets
+// Callback Mercado Livre → Tokens → Nickname → Grava → Redireciona ao Mercado Livre
 app.get(REDIRECT_PATH, async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -94,7 +99,10 @@ app.get(REDIRECT_PATH, async (req, res) => {
 
     const code_verifier = verifierStore.get(state);
     verifierStore.delete(state);
-    if (!code_verifier) return res.status(400).send("state inválido/expirado (hibernação?)");
+
+    if (!code_verifier) {
+      return res.status(400).send("state inválido/expirado (hibernação?)");
+    }
 
     const tokenUrl = "https://api.mercadolibre.com/oauth/token";
     const redirect_uri = `${BASE_URL}${REDIRECT_PATH}`;
@@ -111,7 +119,7 @@ app.get(REDIRECT_PATH, async (req, res) => {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
     });
 
-    // >>> NOVO: buscar nickname no /users/me
+    // Puxar nickname
     let nickname = "";
     try {
       const { data: me } = await axios.get("https://api.mercadolibre.com/users/me", {
@@ -122,7 +130,7 @@ app.get(REDIRECT_PATH, async (req, res) => {
       console.warn("⚠️ Falha ao ler /users/me:", e?.response?.data || e.message);
     }
 
-    // Gravar na planilha (assíncrono)
+    // Gravar na planilha
     appendToSheet({
       user_id: token.user_id,
       nickname,
@@ -130,14 +138,13 @@ app.get(REDIRECT_PATH, async (req, res) => {
       refresh_token: token.refresh_token,
     }).catch(err => console.error("❌ Falha ao gravar no Sheets:", err?.response?.data || err));
 
-    // Resposta amigável ao cliente
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.end(`<h2>Autorização concluída ✅</h2>
-      <p>Seus dados foram salvos com sucesso. Pode fechar esta janela.</p>`);
+    // ✅ Depois de tudo, redireciona o usuário para o Mercado Livre
+    return res.redirect("https://www.mercadolivre.com.br/");
+
   } catch (err) {
     console.error(err?.response?.data || err.message);
-    res.status(500).send("Falha ao processar o callback.");
+    return res.status(500).send("Falha ao processar o callback.");
   }
 });
 
-app.listen(PORT, () => console.log(`Listening on http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`✅ Servidor rodando em http://localhost:${PORT}`));
